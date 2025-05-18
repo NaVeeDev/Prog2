@@ -89,14 +89,14 @@ let go prog mir : analysis_results =
             let state = 
               match rv with 
                 | RVplace pl1 | RVborrow (_, pl1) | RVunop (_, pl1) -> move_or_copy pl1 state
+                | RVunit | RVconst _ -> state
                 | RVbinop (_, pl1, pl2) -> move_or_copy pl1 (move_or_copy pl2 state)
                 | RVmake (_, pls) -> List.fold_right move_or_copy pls state
-                | RVunit | RVconst _ -> state
             in
             let state = initialize pl state in
             go next state
       | Ideinit (l, next) ->
-            let state = PlaceSet.add (PlLocal l) state in
+            let state = deinitialize (PlLocal l) state in
             go next state
       | Igoto next -> go next state
       | Iif (pl, next1, next2) ->
