@@ -116,12 +116,36 @@ let borrowck prog mir =
     mir.minstrs;
 
   (* We check the code honors the non-mutability of shared borrows. *)
-  Array.iteri
-    (fun _ (instr, loc) ->
+  Array.iter
+    (fun (instr, loc) ->
       (* TODO: check that we never write to shared borrows, and that we never create mutable borrows
         below shared borrows. Function [place_mut] can be used to determine if a place is mutable, i.e., if it
         does not dereference a shared borrow. *)
-      ()
+      (
+        let is_mut = place_mut prog mir in
+         match instr with
+         | Iassign (pl, rv, next) -> 
+              if (is_mut pl) = NotMut then 
+                Error.error loc "Writing to a shared borrow."
+              else
+                (match rv with
+                | RVplace pl1 -> if (is_mut pl1) = NotMut then
+                    Error.error loc "Writing to a shared borrow."
+                | RVborrow (mut, pl') -> if mut = Mut then
+                    Error.error loc "Creating a mutable borrow below a shared borrow."
+                | _ -> ()
+                )
+         | Ideinit (l, rv) -> 
+                let pl = PlLocal l in
+                if (is_mut pl) = NotMut then
+                  Error.error loc "Writing to a shared borrow." (* pas sure?? *)
+         | Icall (s, pll, pl, next) ->                          (* pas sure?? *)
+              if (is_mut pl) = NotMut then
+                Error.error loc "Writing to a shared borrow."
+      
+         | _ -> ()
+
+    )
     )
     mir.minstrs;
 
