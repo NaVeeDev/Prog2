@@ -1,6 +1,6 @@
 (* Once you are done writing the code, remove this directive,
    whose purpose is to disable several warnings. *)
-[@@@warning "-26-27-33"]
+(* [@@@warning "-26-27-33"] *)
 
 (* You should read and understand active_borrows.ml *fully*, before filling the holes
   in this file. The analysis in this file follows the same structure. *)
@@ -59,7 +59,11 @@ let go prog mir : analysis_results =
 
   (* Effect of using (copying or moving) a place [pl] on the abstract state [state]. *)
   let move_or_copy pl state =
-    state (* TODO : This code is incorrect. Replace with correct code. *)
+    let ty = typ_of_place prog mir pl in
+    if typ_is_copy prog ty then
+      state
+    else
+      deinitialize pl state
   in
 
   (* These modules are parameters of the [Fix.DataFlow.ForIntSegment] functor below. *)
@@ -77,10 +81,33 @@ let go prog mir : analysis_results =
       similar data flow analysis. *)
 
     let foreach_root go =
-      () (* TODO *)
+      go mir.mentry all_places
 
     let foreach_successor lbl state go =
-        () (* TODO *)
+      match fst mir.minstrs.(lbl) with
+      | Iassign (pl, rv, next) -> 
+            let state = 
+              match rv with 
+                | RVplace pl1 | RVborrow (_, pl1) | RVunop (_, pl1) -> move_or_copy pl1 state
+                | RVbinop (_, pl1, pl2) -> move_or_copy pl1 (move_or_copy pl2 state)
+                | RVmake (_, pls) -> List.fold_right move_or_copy pls state
+                | RVunit | RVconst _ -> state
+            in
+            let state = initialize pl state in
+            go next state
+      | Ideinit (l, next) ->
+            let state = PlaceSet.add (PlLocal l) state in
+            go next state
+      | Igoto next -> go next state
+      | Iif (pl, next1, next2) ->
+            let state = move_or_copy pl state in
+            go next1 state;
+            go next2 state
+      | Ireturn -> ()
+      | Icall (_f, args, dest, next) ->
+            let state = List.fold_right move_or_copy args state in
+            let state = initialize dest state in
+            go next state
   end in
   let module Fix = Fix.DataFlow.ForIntSegment (Instrs) (Prop) (Graph) in
   fun i -> Option.value (Fix.solution i) ~default:PlaceSet.empty
