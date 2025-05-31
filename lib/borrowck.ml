@@ -41,6 +41,44 @@ let compute_lft_sets prog mir : lifetime -> PpSet.t =
     SUGGESTION: use functions [typ_of_place], [fields_types_fresh] and [fn_prototype_fresh].
   *)
 
+  let rec unify_lft_types ty1 ty2 =
+    match ty1, ty2 with
+    | Tborrow (lft1, _, ty1'), Tborrow (lft2, _, ty2') ->
+        unify_lft lft1 lft2;
+        unify_lft_types ty1' ty2'
+    | Tstruct (n1, args1), Tstruct (n2, args2) when n1 = n2 ->
+        List.iter2 unify_lft args1 args2
+    | _ -> ()
+  in
+
+  Array.iter
+    (fun (instr, _) ->
+      match instr with
+      | Iassign (pl, rv, _) -> (
+          let ty_pl = typ_of_place prog mir pl in
+          let ty_rv =
+            match rv with
+            | RVplace pl2 | RVunop (_, pl2) | RVborrow (_, pl2) -> typ_of_place prog mir pl2
+            | RVbinop (_, pl1, pl2) ->
+                unify_lft_types ty_pl (typ_of_place prog mir pl1);
+                unify_lft_types ty_pl (typ_of_place prog mir pl2);
+                ty_pl
+            | RVmake (_, _) -> ty_pl
+            | RVunit -> Tunit
+            | RVconst _ -> Ti32
+          in
+          unify_lft_types ty_pl ty_rv
+        )
+      | Icall (fname, args, dest, _) ->
+          let (fn_args, fn_ret, outlives) = fn_prototype_fresh prog fname in
+          List.iter2 unify_lft_types fn_args (List.map (typ_of_place prog mir) args);
+          unify_lft_types (typ_of_place prog mir dest) fn_ret
+      | _ -> ()
+    )
+    mir.minstrs;
+
+  (* Now, we compute the set of living lifetimes at every program point. *)
+
   (* The [living] variable contains constraints of the form "lifetime 'a should be
     alive at program point p". *)
   let living : PpSet.t LMap.t ref = ref LMap.empty in
@@ -64,6 +102,30 @@ let compute_lft_sets prog mir : lifetime -> PpSet.t =
        (those in [mir.mgeneric_lfts]) should be alive during the whole execution of the
        function.
   *)
+
+  let rec free_lfts_of_type ty =
+    match ty with
+    | Tborrow (lft, _, ty') -> LSet.add lft (free_lfts_of_type ty')
+    | Tstruct (_, args) -> List.fold_left (fun acc lft -> LSet.add lft acc) LSet.empty args
+    | _ -> LSet.empty
+  in
+  
+
+  Array.iteri (fun lbl _ ->
+    (* Pour chaque variable locale vivante à ce point, on ajoute une contrainte pour chaque lifetime libre dans son type *)
+    let live = live_locals lbl in
+    List.iter (fun l ->
+      let ty = Hashtbl.find mir.mlocals l in
+      let lfts = free_lfts_of_type ty in
+      LSet.iter (fun lft -> add_living (PpLocal lbl) lft) lfts
+    ) (LocSet.elements live)
+  ) mir.minstrs;
+
+  (* Les lifetimes génériques doivent être vivantes pendant toute l'exécution *)
+  List.iter (fun lft ->
+    Array.iteri (fun lbl _ -> add_living (PpLocal lbl) lft) mir.minstrs
+  ) mir.mgeneric_lfts;
+
 
   (* If [lft] is a generic lifetime, [lft] is always alive at [PpInCaller lft]. *)
   List.iter (fun lft -> add_living (PpInCaller lft) lft) mir.mgeneric_lfts;
