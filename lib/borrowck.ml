@@ -217,6 +217,25 @@ let borrowck prog mir =
     enough to ensure safety. I.e., if [lft_sets lft] contains program point [PpInCaller lft'], this
     means that we need that [lft] be alive when [lft'] dies, i.e., [lft'] outlives [lft]. This relation
     has to be declared in [mir.outlives_graph]. *)
+  
+  let ghost_loc : Lexing.position * Lexing.position = Lexing.dummy_pos, Lexing.dummy_pos in
+
+  LSet.iter (fun l1 ->
+    let l1_pts = lft_sets l1 in
+    PpSet.iter (function
+      | PpInCaller l2 ->
+          let declared =
+            match LMap.find_opt l2 mir.moutlives_graph with
+            | Some s -> LSet.mem l1 s
+            | None -> false
+          in
+          if not declared then
+            Error.error ghost_loc
+              "Missing outlives constraint: lifetime %s must outlive lifetime %s."
+              (string_of_lft l2) (string_of_lft l1)
+      | _ -> ())
+      l1_pts
+  ) (LMap.fold (fun k _ acc -> LSet.add k acc) mir.moutlives_graph LSet.empty);
 
   (* We check that we never perform any operation which would conflict with an existing
     borrows. *)
@@ -295,6 +314,14 @@ let borrowck prog mir =
       | Iassign (_, RVborrow (mut, pl), _) ->
           if conflicting_borrow (mut = Mut) pl then
             Error.error loc "There is a borrow conflicting this borrow."
-      | _ -> () (* TODO: complete the other cases*)
+      | Iassign (_, RVbinop (_, pl1, pl2), _) ->
+          check_use pl1;
+          check_use pl2
+      | Iassign (_, RVmake (_, pls), _) ->
+          List.iter check_use pls
+      | Icall (_, pls, _, _) ->
+          List.iter check_use pls
+      | Iif (pl, _, _) -> check_use pl
+      | _ -> ()
     )
     mir.minstrs
