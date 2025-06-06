@@ -67,10 +67,24 @@ let compute_lft_sets prog mir : lifetime -> PpSet.t =
             | RVunit -> Tunit
             | RVconst _ -> Ti32
           in
-          unify_lft_types ty_pl ty_rv
+          unify_lft_types ty_pl ty_rv;
+          match rv with
+          | RVborrow (_, pl2) ->
+              let rec add_reborrow_constraints lft ty =
+                match ty with
+                | Tborrow (lft2, _, ty') ->
+                    add_outlives (lft2, lft);
+                    add_reborrow_constraints lft ty'
+                | _ -> ()
+              in
+              (match typ_of_place prog mir pl with
+              | Tborrow (lft, _, _) ->
+                  add_reborrow_constraints lft (typ_of_place prog mir pl2)
+              | _ -> ())
+          | _ -> ()
         )
       | Icall (fname, args, dest, _) ->
-          let (fn_args, fn_ret, outlives) = fn_prototype_fresh prog fname in
+          let (fn_args, fn_ret, _) = fn_prototype_fresh prog fname in
           List.iter2 unify_lft_types fn_args (List.map (typ_of_place prog mir) args);
           unify_lft_types (typ_of_place prog mir dest) fn_ret
       | _ -> ()
@@ -112,7 +126,6 @@ let compute_lft_sets prog mir : lifetime -> PpSet.t =
   
 
   Array.iteri (fun lbl _ ->
-    (* Pour chaque variable locale vivante à ce point, on ajoute une contrainte pour chaque lifetime libre dans son type *)
     let live = live_locals lbl in
     List.iter (fun l ->
       let ty = Hashtbl.find mir.mlocals l in
@@ -121,7 +134,6 @@ let compute_lft_sets prog mir : lifetime -> PpSet.t =
     ) (LocSet.elements live)
   ) mir.minstrs;
 
-  (* Les lifetimes génériques doivent être vivantes pendant toute l'exécution *)
   List.iter (fun lft ->
     Array.iteri (fun lbl _ -> add_living (PpLocal lbl) lft) mir.minstrs
   ) mir.mgeneric_lfts;
@@ -220,10 +232,12 @@ let borrowck prog mir =
   
   let ghost_loc : Lexing.position * Lexing.position = Lexing.dummy_pos, Lexing.dummy_pos in
 
+  let is_generic lft = List.mem lft mir.mgeneric_lfts in
+
   LSet.iter (fun l1 ->
     let l1_pts = lft_sets l1 in
     PpSet.iter (function
-      | PpInCaller l2 ->
+      | PpInCaller l2  -> if is_generic l1 && is_generic l2 then (
           let declared =
             match LMap.find_opt l2 mir.moutlives_graph with
             | Some s -> LSet.mem l1 s
@@ -232,10 +246,11 @@ let borrowck prog mir =
           if not declared then
             Error.error ghost_loc
               "Missing outlives constraint: lifetime %s must outlive lifetime %s."
-              (string_of_lft l2) (string_of_lft l1)
+              (string_of_lft l2) (string_of_lft l1) )
+          else ()
       | _ -> ())
       l1_pts
-  ) (LMap.fold (fun k _ acc -> LSet.add k acc) mir.moutlives_graph LSet.empty);
+  ) (LSet.of_list mir.mgeneric_lfts);
 
   (* We check that we never perform any operation which would conflict with an existing
     borrows. *)
